@@ -84,6 +84,11 @@ on:
         required: true
         type: boolean
         default: 'true'
+      zram_writeback_enable:
+        description: '是否启用ZRAM Writeback(允许将zram中的空闲/不可压缩页写回后备存储设备,释放RAM; 需配合用户空间脚本配置backing device才能生效)'
+        required: true
+        type: boolean
+        default: 'false'
       ccache_debug:
         description: '是否上传 Ccache调试日志(用于调试, 无需要不必开启)'
         required: true
@@ -97,7 +102,7 @@ on:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     outputs:
       ksuver: ${{ steps.ksu_version.outputs.ksuver }}
     steps:
@@ -173,19 +178,24 @@ jobs:
           # 确保ccache目录存在
           mkdir -p "$CCACHE_DIR"
           
-          # 每次运行都重新配置缓存大小
+          # 尝试配置ccache，如果缓存损坏则清除后重试
           echo "配置ccache缓存大小为: $CCACHE_MAXSIZE"
-          ccache -M "$CCACHE_MAXSIZE"
-          ccache -o compression=true
+          if ! ccache -M "$CCACHE_MAXSIZE" 2>/dev/null; then
+            echo "⚠️ ccache配置失败，尝试清除损坏的缓存..."
+            ccache -C 2>/dev/null || true
+            rm -rf "$CCACHE_DIR"/*
+            ccache -M "$CCACHE_MAXSIZE"
+          fi
+          ccache -o compression=true || true
           
           # 显示初始缓存状态
           echo "ccache初始状态:"
-          ccache -s
+          ccache -s || true
           
           # 如果缓存恢复命中，显示详细信息
           if [ "${{ steps.ccache-restore.outputs.cache-hit }}" == 'true' ]; then
             echo "ccache缓存命中详情:"
-            ccache -sv
+            ccache -sv || true
           fi
 
       - name: 添加KernelSU
@@ -589,6 +599,13 @@ jobs:
           cd kernel_workspace
           echo "CONFIG_WQ_POWER_EFFICIENT_DEFAULT=y" >> ./common/arch/arm64/configs/gki_defconfig
 
+      - name: 启用ZRAM Writeback
+        if: inputs.zram_writeback_enable
+        run: |
+          echo "正在启用ZRAM Writeback..."
+          cd kernel_workspace
+          echo "CONFIG_ZRAM_WRITEBACK=y" >> ./common/arch/arm64/configs/gki_defconfig
+
       - name: 添加制作名称
         run: |
           cd kernel_workspace
@@ -755,7 +772,7 @@ jobs:
 
   release:
     needs: build
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     permissions:
       contents: write
       packages: write
@@ -821,6 +838,7 @@ jobs:
             - ADIOS IO调度器支持：${{ github.event.inputs.adios_enable }}
             - Re-Kernel支持：${{ github.event.inputs.rekernel_enable }}
             - 内核级基带保护支持：${{ github.event.inputs.baseband_guard }}
+            - ZRAM Writeback: ${{ github.event.inputs.zram_writeback_enable }}
             - SukiSU Ultra管理器下载：[SukiSU-Ultra](https://github.com/SukiSU-Ultra/SukiSU-Ultra/releases)
             - KernelSU Next管理器下载：[KernelSU-Next](https://github.com/KernelSU-Next/KernelSU-Next/releases)
             - MKSU管理器下载：[Magic-KernelSU](https://github.com/5ec1cff/KernelSU/actions)
