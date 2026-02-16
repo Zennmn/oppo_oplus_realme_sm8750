@@ -493,6 +493,8 @@ jobs:
           fi
           if [[ "${{ github.event.inputs.lazy_rcu_enable }}" == "true" ]]; then
             echo "CONFIG_RCU_EXPERT=y" >> ./common/arch/arm64/configs/gki_defconfig
+            echo "CONFIG_RCU_NOCB_CPU=y" >> ./common/arch/arm64/configs/gki_defconfig
+            echo "CONFIG_RCU_NOCB_CPU_DEFAULT_ALL=y" >> ./common/arch/arm64/configs/gki_defconfig
             echo "CONFIG_RCU_LAZY=y" >> ./common/arch/arm64/configs/gki_defconfig
             echo "CONFIG_RCU_LAZY_DEFAULT_OFF=n" >> ./common/arch/arm64/configs/gki_defconfig
           else
