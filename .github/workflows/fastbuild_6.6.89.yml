@@ -951,6 +951,34 @@ jobs:
                 echo "BBRv3 full bridge: downgraded req->rsk_ops->send_reset() to 2-arg form"
               fi
             fi
+            if [[ -f common/net/ipv4/tcp.c ]]; then
+              if [[ -f common/include/net/sock.h ]] && ! grep -q "sk_user_frags" common/include/net/sock.h; then
+                python - <<'PY'
+          from pathlib import Path
+          p = Path("common/net/ipv4/tcp.c")
+          s = p.read_text(encoding="utf-8", errors="ignore")
+          s = s.replace(
+              "rto_min_us = READ_ONCE(sock_net(sk)->ipv4.sysctl_tcp_rto_min_us);",
+              "rto_min_us = jiffies_to_usecs(TCP_RTO_MIN);",
+          )
+          s = s.replace("xa_init_flags(&sk->sk_user_frags, XA_FLAGS_ALLOC1);\n", "")
+          s = s.replace("SOF_TIMESTAMPING_OPT_RX_FILTER", "0")
+          marker = "/* batch __xa_alloc() calls and reduce xa_lock()/xa_unlock() overhead. */"
+          start = s.find(marker)
+          if start != -1:
+              end = s.find("static int tcp_recvmsg_locked(struct sock *sk, struct msghdr *msg, size_t len,", start + len(marker))
+              if end != -1:
+                  stub = """/* BBRv3 full bridge: disable dmabuf recv path for trees without sk_user_frags/netmem. */\nstatic int tcp_recvmsg_dmabuf(struct sock *sk, const struct sk_buff *skb,\n\t\t\t      unsigned int offset, struct msghdr *msg,\n\t\t\t      int remaining_len)\n{\n\t(void)sk;\n\t(void)skb;\n\t(void)offset;\n\t(void)msg;\n\t(void)remaining_len;\n\treturn -EOPNOTSUPP;\n}\n\n"""
+                  s = s[:start] + stub + s[end:]
+          p.write_text(s, encoding="utf-8")
+          print("BBRv3 full bridge: applied tcp.c fallback rewrites for old sock/netmem layout")
+          PY
+              fi
+              if [[ -f common/include/net/sock.h ]] && ! grep -q "struct sockcm_cookie \\*sockc" common/include/net/sock.h; then
+                sed -i 's/sock_tx_timestamp(sk, sockc, &shinfo->tx_flags);/sock_tx_timestamp(sk, sockc->tsflags, &shinfo->tx_flags);/g' common/net/ipv4/tcp.c
+                echo "BBRv3 full bridge: adapted sock_tx_timestamp() call for old sock.h signature"
+              fi
+            fi
             if [[ -f common/net/ipv4/tcp_output.c ]]; then
               python - <<'PY'
           from pathlib import Path
