@@ -670,12 +670,54 @@ jobs:
                 echo "#ifndef _NET_TCP_AO_H"
                 echo "#define _NET_TCP_AO_H"
                 echo ""
+                echo "#include <linux/types.h>"
                 echo "struct sock;"
                 echo "struct tcp_sock;"
                 echo "struct request_sock;"
                 echo "struct sk_buff;"
-                echo "struct tcp_ao_key;"
+                echo "struct tcphdr;"
+                echo "union tcp_ao_addr { __be32 addr4; __be32 addr6[4]; };"
+                echo "struct tcp_ao_hdr { __u8 kind; __u8 length; };"
+                echo "struct tcp_ao_key { __u8 keylen; };"
                 echo "struct tcp_ao_info;"
+                echo ""
+                echo "#ifndef static_branch_tcp_md5"
+                echo "#define static_branch_tcp_md5() 0"
+                echo "#endif"
+                echo "#ifndef static_branch_tcp_ao"
+                echo "#define static_branch_tcp_ao() 0"
+                echo "#endif"
+                echo "#ifndef tcp_ao_len_aligned"
+                echo "#define tcp_ao_len_aligned(...) 0"
+                echo "#endif"
+                echo "#ifndef tcp_ao_transmit_skb"
+                echo "#define tcp_ao_transmit_skb(...) 0"
+                echo "#endif"
+                echo "#ifndef tcp_do_parse_auth_options"
+                echo "#define tcp_do_parse_auth_options(...) 0"
+                echo "#endif"
+                echo "#ifndef tw_usec_ts"
+                echo "#define tw_usec_ts tw_ts_offset"
+                echo "#endif"
+                echo "#ifndef skb_frags_readable"
+                echo "#define skb_frags_readable(...) 1"
+                echo "#endif"
+                echo "#ifndef SKB_CLOCK_MONOTONIC"
+                echo "#define SKB_CLOCK_MONOTONIC 0"
+                echo "#endif"
+                echo "#ifndef noinline_for_tracing"
+                echo "#define noinline_for_tracing noinline"
+                echo "#endif"
+                echo "#ifndef sysctl_tcp_backlog_ack_defer"
+                echo "#define sysctl_tcp_backlog_ack_defer sysctl_tcp_plb_cong_thresh"
+                echo "#endif"
+                echo "#ifndef sk_skb_reason_drop"
+                echo "#define sk_skb_reason_drop(...) do { } while (0)"
+                echo "#endif"
+                echo "#ifndef skb_set_owner_edemux"
+                echo "#define skb_set_owner_edemux(...) do { } while (0)"
+                echo "#endif"
+                echo "enum sk_rst_reason { SK_RST_REASON_NOT_SPECIFIED = 0 };"
                 echo ""
                 echo "#endif /* _NET_TCP_AO_H */"
               } > common/include/net/tcp_ao.h
@@ -710,6 +752,18 @@ jobs:
                 echo "#endif /* _LINUX_SKBUFF_REF_H */"
               } > common/include/linux/skbuff_ref.h
               echo "BBRv3 full bridge: created include/linux/skbuff_ref.h"
+            fi
+            if [[ -f common/include/net/tcp.h ]] && grep -q "tw_usec_ts" common/include/net/tcp.h; then
+              sed -E -i 's/tcp_clock_ts\(tcptw->[^)]*tw_usec_ts\)[[:space:]]*\+[[:space:]]*tcptw->tw_ts_offset/0/g' common/include/net/tcp.h
+              echo "BBRv3 full bridge: neutralized tw_usec_ts dependency in include/net/tcp.h"
+            fi
+            if [[ -f common/include/net/tcp.h ]] && grep -q "skb_frags_readable(" common/include/net/tcp.h; then
+              sed -E -i 's/skb_frags_readable\([^)]*\)[[:space:]]*==[[:space:]]*skb_frags_readable\([^)]*\)/1/g' common/include/net/tcp.h
+              echo "BBRv3 full bridge: neutralized skb_frags_readable dependency in include/net/tcp.h"
+            fi
+            if [[ -f common/net/ipv4/tcp_bbr.c && -f common/include/linux/btf_ids.h ]] && ! grep -q "BTF_KFUNCS_START" common/include/linux/btf_ids.h; then
+              sed -i 's/BTF_KFUNCS_START(/BTF_SET8_START(/g; s/BTF_KFUNCS_END(/BTF_SET8_END(/g' common/net/ipv4/tcp_bbr.c
+              echo "BBRv3 full bridge: mapped BTF_KFUNCS_* to BTF_SET8_* in tcp_bbr.c"
             fi
           fi
 
