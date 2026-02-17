@@ -1250,6 +1250,31 @@ jobs:
               print("BBRv3 full bridge: applied tcp_ipv6.c API adaptation shims")
           PY
             fi
+            if [[ -f common/net/ipv6/tcpv6_offload.c ]]; then
+              python - <<'PY'
+          import re
+          from pathlib import Path
+
+          p = Path("common/net/ipv6/tcpv6_offload.c")
+          s = p.read_text(encoding="utf-8", errors="ignore")
+          changed = False
+
+          if "tcp_gro_receive(head, skb, th)" not in s:
+              s_new, n = re.subn(
+                  r"return\s+tcp_gro_receive\(\s*head\s*,\s*skb\s*\)\s*;",
+                  "struct tcphdr *th = tcp_gro_pull_header(skb);\n\tif (!th) {\n\t\tNAPI_GRO_CB(skb)->flush = 1;\n\t\treturn NULL;\n\t}\n\treturn tcp_gro_receive(head, skb, th);",
+                  s,
+                  count=1,
+              )
+              if n:
+                  s = s_new
+                  changed = True
+
+          if changed:
+              p.write_text(s, encoding="utf-8")
+              print("BBRv3 full bridge: adapted tcpv6_offload.c to tcp_gro_receive(head, skb, th)")
+          PY
+            fi
             if [[ -f common/net/ipv4/tcp_output.c ]]; then
               python - <<'PY'
           from pathlib import Path
@@ -1298,6 +1323,7 @@ jobs:
               ("common/include/uapi/linux/tcp.h", r"TCPI_OPT_ECN_LOW", "include/uapi/linux/tcp.h missing TCPI_OPT_ECN_LOW"),
               ("common/include/uapi/linux/rtnetlink.h", r"RTAX_FEATURE_ECN_LOW", "include/uapi/linux/rtnetlink.h missing RTAX_FEATURE_ECN_LOW"),
               ("common/net/ipv4/tcp_offload.c", r"tcp_gro_receive\(head,\s*skb,\s*th\)", "tcp_offload.c missing tcp_gro_receive(head, skb, th) call"),
+              ("common/net/ipv6/tcpv6_offload.c", r"tcp_gro_receive\(head,\s*skb,\s*th\)", "tcpv6_offload.c missing tcp_gro_receive(head, skb, th) call"),
           ]
 
           errors = []
@@ -1451,7 +1477,7 @@ jobs:
           cd kernel_workspace/common
           make LLVM=1 ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- O=out KCFLAGS+=-O2 KCFLAGS+=-Wno-error gki_defconfig
           echo "BBRv3 full-stack quick object build check..."
-          make -j$(nproc --all) LLVM=1 ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- O=out KCFLAGS+=-O2 KCFLAGS+=-Wno-error net/ipv4/tcp_bbr.o net/ipv4/tcp_rate.o net/ipv4/tcp_input.o net/ipv4/tcp_output.o net/ipv4/tcp_cong.o net/ipv4/tcp_minisocks.o net/ipv4/tcp_timer.o net/ipv4/tcp_offload.o net/ipv4/bpf_tcp_ca.o net/ipv4/tcp.o net/ipv4/tcp_diag.o net/ipv4/route.o
+          make -j$(nproc --all) LLVM=1 ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- O=out KCFLAGS+=-O2 KCFLAGS+=-Wno-error net/ipv4/tcp_bbr.o net/ipv4/tcp_rate.o net/ipv4/tcp_input.o net/ipv4/tcp_output.o net/ipv4/tcp_cong.o net/ipv4/tcp_minisocks.o net/ipv4/tcp_timer.o net/ipv4/tcp_offload.o net/ipv4/bpf_tcp_ca.o net/ipv4/tcp.o net/ipv4/tcp_diag.o net/ipv4/route.o net/ipv6/tcpv6_offload.o
 
       - name: 构建内核
         run: |
