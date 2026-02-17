@@ -721,6 +721,10 @@ jobs:
                 echo "BBRv3 full bridge: adjusted inet_csk() constness in include/net/tls.h"
               fi
             fi
+            if [[ -f common/include/net/espintcp.h ]]; then
+              sed -i 's/struct inet_connection_sock \*icsk = inet_csk(sk);/const struct inet_connection_sock *icsk = inet_csk(sk);/g' common/include/net/espintcp.h
+              echo "BBRv3 full bridge: adjusted inet_csk() constness in include/net/espintcp.h"
+            fi
             if [[ -f common/include/net/inet_connection_sock.h && -f common/net/ipv4/inet_connection_sock.c ]]; then
               if grep -q "inet_csk_accept(struct sock \\*sk, int flags, int \\*err, bool kern)" common/net/ipv4/inet_connection_sock.c && grep -q "inet_csk_accept(struct sock \\*sk, struct proto_accept_arg \\*arg);" common/include/net/inet_connection_sock.h; then
                 sed -i 's/struct sock \*inet_csk_accept(struct sock \*sk, struct proto_accept_arg \*arg);/struct sock *inet_csk_accept(struct sock *sk, int flags, int *err, bool kern);/g' common/include/net/inet_connection_sock.h
@@ -1188,6 +1192,62 @@ jobs:
           if changed:
               p.write_text(s, encoding="utf-8")
               print("BBRv3 full bridge: applied tcp_ipv4.c API adaptation shims")
+          PY
+            fi
+            if [[ -f common/net/ipv6/tcp_ipv6.c ]]; then
+              python - <<'PY'
+          import re
+          from pathlib import Path
+
+          p = Path("common/net/ipv6/tcp_ipv6.c")
+          s = p.read_text(encoding="utf-8", errors="ignore")
+          changed = False
+
+          s_new, n = re.subn(
+              r"(struct request_sock \*req)\s*\)\n\{\n(\s*)tcp_v6_init_req\(req, sk, skb\);",
+              r"\1, u32 isn)\n{\n\2(void)isn;\n\2tcp_v6_init_req(req, sk, skb);",
+              s,
+              count=1,
+          )
+          if n:
+              s = s_new
+              changed = True
+
+          if "tcp_time_stamp_raw()" in s:
+              s = s.replace("tcp_time_stamp_raw()", "tcp_jiffies32")
+              changed = True
+
+          if "TCP_SKB_CB(skb)->tcp_tw_isn = 0;" in s:
+              s = s.replace("TCP_SKB_CB(skb)->tcp_tw_isn = 0;\n", "")
+              changed = True
+          if "TCP_SKB_CB(skb)->tcp_tw_isn" in s:
+              s = s.replace("TCP_SKB_CB(skb)->tcp_tw_isn", "0")
+              changed = True
+
+          if "tcp_inbound_md5_hash(sk, skb," in s:
+              s = s.replace("tcp_inbound_md5_hash(sk, skb,", "tcp_inbound_hash(sk, NULL, skb,")
+              changed = True
+
+          if "tcp_timewait_state_process(inet_twsk(sk), skb, th)" in s:
+              s = s.replace(
+                  "tcp_timewait_state_process(inet_twsk(sk), skb, th)",
+                  "tcp_timewait_state_process(inet_twsk(sk), skb, th, &isn)",
+              )
+              changed = True
+
+          if ".net_frag_header_len" in s:
+              s = s.replace(".net_frag_header_len", ".net_header_len")
+              changed = True
+
+          decl_old = "bool refcounted;\n\tstruct sock *sk;\n\tint ret;\n"
+          decl_new = "bool refcounted;\n\tstruct sock *sk;\n\tint ret;\n\tu32 isn;\n"
+          if decl_old in s and "u32 isn;" not in s:
+              s = s.replace(decl_old, decl_new, 1)
+              changed = True
+
+          if changed:
+              p.write_text(s, encoding="utf-8")
+              print("BBRv3 full bridge: applied tcp_ipv6.c API adaptation shims")
           PY
             fi
             if [[ -f common/net/ipv4/tcp_output.c ]]; then
