@@ -591,7 +591,9 @@ jobs:
             include/uapi/linux/inet_diag.h
           )
           bbrv3_files_full=(
+            include/linux/skbuff_ref.h
             include/linux/tcp.h
+            include/linux/unaligned.h
             include/net/inet_connection_sock.h
             include/net/tcp.h
             include/net/tcp_ao.h
@@ -684,15 +686,28 @@ jobs:
                 echo "#endif /* _NET_PROTO_MEMORY_H */"
               } > common/include/net/proto_memory.h
             fi
-            if [[ -f common/include/net/tcp.h && -f common/include/net/inet_timewait_sock.h ]] && ! grep -q "tw_usec_ts" common/include/net/inet_timewait_sock.h; then
-              if grep -q "tw_ts_recent_stamp" common/include/net/inet_timewait_sock.h; then
-                sed -i 's/tw_sk.tw_usec_ts/tw_sk.tw_ts_recent_stamp/g' common/include/net/tcp.h
-              else
-                sed -E -i 's/tcp_clock_ts\\(tcptw->tw_sk.tw_usec_ts\\)[[:space:]]*\\+[[:space:]]*tcptw->tw_ts_offset/0/g' common/include/net/tcp.h
-              fi
+            if [[ ! -f common/include/linux/unaligned.h ]]; then
+              {
+                echo "/* BBRv3 fullstack compat stub for vendor trees without linux/unaligned.h. */"
+                echo "#ifndef _LINUX_UNALIGNED_H"
+                echo "#define _LINUX_UNALIGNED_H"
+                echo "#include <asm/unaligned.h>"
+                echo "#endif /* _LINUX_UNALIGNED_H */"
+              } > common/include/linux/unaligned.h
             fi
-            if [[ -f common/include/net/tcp.h && -f common/include/linux/skbuff.h ]] && ! grep -q "skb_frags_readable" common/include/linux/skbuff.h; then
-              sed -E -i 's/skb_frags_readable\\([^)]*\\)[[:space:]]*==[[:space:]]*skb_frags_readable\\([^)]*\\)/1/g' common/include/net/tcp.h
+            if [[ ! -f common/include/linux/skbuff_ref.h ]]; then
+              {
+                echo "/* BBRv3 fullstack compat stub for vendor trees without linux/skbuff_ref.h. */"
+                echo "#ifndef _LINUX_SKBUFF_REF_H"
+                echo "#define _LINUX_SKBUFF_REF_H"
+                echo "#include <linux/types.h>"
+                echo "struct sk_buff;"
+                echo "#endif /* _LINUX_SKBUFF_REF_H */"
+              } > common/include/linux/skbuff_ref.h
+            fi
+            if [[ -f common/include/net/tcp.h ]]; then
+              sed -E -i 's/tcp_clock_ts\(tcptw->[^)]*tw_usec_ts\)[[:space:]]*\+[[:space:]]*tcptw->tw_ts_offset/0/g' common/include/net/tcp.h
+              sed -E -i 's/skb_frags_readable\([^)]*\)[[:space:]]*==[[:space:]]*skb_frags_readable\([^)]*\)/1/g' common/include/net/tcp.h
             fi
           fi
 
