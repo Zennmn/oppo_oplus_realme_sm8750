@@ -652,6 +652,12 @@ jobs:
                 echo "BBRv3 full bridge: adjusted inet_csk() constness in include/net/tls.h"
               fi
             fi
+            if [[ -f common/include/net/inet_connection_sock.h && -f common/net/ipv4/inet_connection_sock.c ]]; then
+              if grep -q "inet_csk_accept(struct sock \\*sk, int flags, int \\*err, bool kern)" common/net/ipv4/inet_connection_sock.c && grep -q "inet_csk_accept(struct sock \\*sk, struct proto_accept_arg \\*arg);" common/include/net/inet_connection_sock.h; then
+                sed -i 's/struct sock \*inet_csk_accept(struct sock \*sk, struct proto_accept_arg \*arg);/struct sock *inet_csk_accept(struct sock *sk, int flags, int *err, bool kern);/g' common/include/net/inet_connection_sock.h
+                echo "BBRv3 full bridge: downgraded inet_csk_accept prototype for old inet_connection_sock.c"
+              fi
+            fi
             # vendor bridge: provide cacheline group helpers if base tree lacks them
             if [[ -f common/include/linux/cache.h ]] && ! grep -q "__cacheline_group_begin" common/include/linux/cache.h; then
               {
