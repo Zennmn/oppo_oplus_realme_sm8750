@@ -707,8 +707,11 @@ jobs:
                 echo "#ifndef tcp_ao_established"
                 echo "#define tcp_ao_established(...) do { } while (0)"
                 echo "#endif"
-                echo "#ifndef tw_usec_ts"
-                echo "#define tw_usec_ts tw_ts_offset"
+                echo "#ifndef tcp_ao_time_wait"
+                echo "#define tcp_ao_time_wait(...) do { } while (0)"
+                echo "#endif"
+                echo "#ifndef tcp_ao_destroy_sock"
+                echo "#define tcp_ao_destroy_sock(...) do { } while (0)"
                 echo "#endif"
                 echo "#ifndef skb_frags_readable"
                 echo "#define skb_frags_readable(...) 1"
@@ -736,7 +739,34 @@ jobs:
                 echo "#endif"
                 echo "#ifndef __SK_RST_REASON_ENUM_DEFINED"
                 echo "#define __SK_RST_REASON_ENUM_DEFINED"
-                echo "enum sk_rst_reason { SK_RST_REASON_NOT_SPECIFIED = 0 };"
+                echo "enum sk_rst_reason {"
+                echo "  SK_RST_REASON_NOT_SPECIFIED = 0,"
+                echo "  SK_RST_REASON_NO_SOCKET,"
+                echo "  SK_RST_REASON_TCP_INVALID_ACK_SEQUENCE,"
+                echo "  SK_RST_REASON_TCP_RFC7323_PAWS,"
+                echo "  SK_RST_REASON_TCP_TOO_OLD_ACK,"
+                echo "  SK_RST_REASON_TCP_ACK_UNSENT_DATA,"
+                echo "  SK_RST_REASON_TCP_FLAGS,"
+                echo "  SK_RST_REASON_TCP_OLD_ACK,"
+                echo "  SK_RST_REASON_TCP_ABORT_ON_DATA,"
+                echo "  SK_RST_REASON_TCP_TIMEWAIT_SOCKET,"
+                echo "  SK_RST_REASON_INVALID_SYN,"
+                echo "  SK_RST_REASON_TCP_ABORT_ON_CLOSE,"
+                echo "  SK_RST_REASON_TCP_ABORT_ON_LINGER,"
+                echo "  SK_RST_REASON_TCP_ABORT_ON_MEMORY,"
+                echo "  SK_RST_REASON_TCP_STATE,"
+                echo "  SK_RST_REASON_TCP_KEEPALIVE_TIMEOUT,"
+                echo "  SK_RST_REASON_TCP_DISCONNECT_WITH_DATA,"
+                echo "  SK_RST_REASON_MPTCP_RST_EUNSPEC,"
+                echo "  SK_RST_REASON_MPTCP_RST_EMPTCP,"
+                echo "  SK_RST_REASON_MPTCP_RST_ERESOURCE,"
+                echo "  SK_RST_REASON_MPTCP_RST_EPROHIBIT,"
+                echo "  SK_RST_REASON_MPTCP_RST_EWQ2BIG,"
+                echo "  SK_RST_REASON_MPTCP_RST_EBADPERF,"
+                echo "  SK_RST_REASON_MPTCP_RST_EMIDDLEBOX,"
+                echo "  SK_RST_REASON_ERROR,"
+                echo "  SK_RST_REASON_MAX,"
+                echo "};"
                 echo "#endif"
                 echo ""
                 echo "#endif /* _NET_TCP_AO_H */"
@@ -839,6 +869,43 @@ jobs:
             if [[ -f common/net/ipv4/tcp_bbr.c && -f common/include/linux/btf_ids.h ]] && ! grep -q "BTF_KFUNCS_START" common/include/linux/btf_ids.h; then
               sed -i 's/BTF_KFUNCS_START(/BTF_SET8_START(/g; s/BTF_KFUNCS_END(/BTF_SET8_END(/g' common/net/ipv4/tcp_bbr.c
               echo "BBRv3 full bridge: mapped BTF_KFUNCS_* to BTF_SET8_* in tcp_bbr.c"
+            fi
+            if [[ -f common/net/ipv4/tcp_minisocks.c ]]; then
+              if [[ -f common/include/net/inet_timewait_sock.h ]] && ! grep -q "tw_usec_ts" common/include/net/inet_timewait_sock.h; then
+                sed -i '/tw->tw_usec_ts[[:space:]]*=/d' common/net/ipv4/tcp_minisocks.c
+                echo "BBRv3 full bridge: dropped tw_usec_ts assignment for old inet_timewait_sock layout"
+              fi
+              if [[ -f common/include/net/inet_timewait_sock.h ]] && ! grep -q "tw_tx_queue_mapping" common/include/net/inet_timewait_sock.h; then
+                sed -i '/tw->tw_tx_queue_mapping[[:space:]]*=/d' common/net/ipv4/tcp_minisocks.c
+                sed -i '/tw->tw_rx_queue_mapping[[:space:]]*=/d' common/net/ipv4/tcp_minisocks.c
+                echo "BBRv3 full bridge: dropped tw_*_queue_mapping assignments for old inet_timewait_sock layout"
+              fi
+              if [[ -f common/include/net/inet_timewait_sock.h ]] && ! grep -q "inet_twsk_hashdance_schedule" common/include/net/inet_timewait_sock.h; then
+                if grep -q "inet_twsk_hashdance(" common/include/net/inet_timewait_sock.h && grep -q "inet_twsk_schedule(" common/include/net/inet_timewait_sock.h; then
+                  python - <<'PY'
+          from pathlib import Path
+          p = Path("common/net/ipv4/tcp_minisocks.c")
+          s = p.read_text(encoding="utf-8", errors="ignore")
+          old = "inet_twsk_hashdance_schedule(tw, sk, net->ipv4.tcp_death_row.hashinfo, timeo);"
+          new = "inet_twsk_hashdance(tw, sk, net->ipv4.tcp_death_row.hashinfo);\\n\\t\\tinet_twsk_schedule(tw, timeo);"
+          if old in s:
+              p.write_text(s.replace(old, new), encoding="utf-8")
+              print("BBRv3 full bridge: rewired inet_twsk_hashdance_schedule -> inet_twsk_hashdance + inet_twsk_schedule")
+          PY
+                fi
+              fi
+              if [[ -f common/include/net/sock.h ]] && ! grep -q "sk_user_frags" common/include/net/sock.h; then
+                sed -i '/xa_init_flags(&newsk->sk_user_frags, XA_FLAGS_ALLOC1);/d' common/net/ipv4/tcp_minisocks.c
+                echo "BBRv3 full bridge: dropped sk_user_frags init for old struct sock layout"
+              fi
+              if [[ -f common/include/net/tcp.h ]] && ! grep -q "tcp_synack_window(" common/include/net/tcp.h; then
+                sed -i 's/tcp_synack_window(req)/tcp_rsk(req)->rcv_wnd/g' common/net/ipv4/tcp_minisocks.c
+                echo "BBRv3 full bridge: mapped tcp_synack_window(req) -> tcp_rsk(req)->rcv_wnd"
+              fi
+              if [[ -f common/include/net/request_sock.h ]] && ! grep -q "enum sk_rst_reason reason" common/include/net/request_sock.h; then
+                sed -i 's/req->rsk_ops->send_reset(sk, skb, SK_RST_REASON_INVALID_SYN);/req->rsk_ops->send_reset(sk, skb);/g' common/net/ipv4/tcp_minisocks.c
+                echo "BBRv3 full bridge: downgraded req->rsk_ops->send_reset() to 2-arg form"
+              fi
             fi
             if [[ -f common/net/ipv4/tcp_output.c ]]; then
               python - <<'PY'
