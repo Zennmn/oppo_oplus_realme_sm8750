@@ -59,11 +59,6 @@ on:
         required: true
         type: boolean
         default: 'false'
-      bbrv3_tag:
-        description: 'BBRv3 来源 tag/branch (默认 bbrv3-2025-03-18)'
-        required: false
-        type: string
-        default: 'bbrv3-2025-03-18'
       bbrv3_port_mode:
         description: 'BBRv3 port mode (full=full-stack sync, compat=tcp_bbr compat)'
         required: true
@@ -73,7 +68,7 @@ on:
           - 'full'
           - 'compat'
       bbrv3_quick_check:
-        description: 'Enable BBRv3 quick tcp_bbr.o compile check'
+        description: 'Enable BBRv3 quick compile check (full=tcp core objs, compat=tcp_bbr.o)'
         required: true
         type: boolean
         default: 'true'
@@ -568,22 +563,21 @@ jobs:
       - name: 自动尝试移植 BBRv3
         if: inputs.bbrv3_auto && inputs.bbr_enable != 'false'
         run: |
-          set -e
+          set -euo pipefail
           cd kernel_workspace
-          BBRV3_REF="${{ github.event.inputs.bbrv3_tag }}"
-          if [[ -z "$BBRV3_REF" ]]; then
-            BBRV3_REF="bbrv3-2025-03-18"
-          fi
+          BBRV3_REF="bbrv3-2025-03-18"
           BBRV3_PORT_MODE="${{ github.event.inputs.bbrv3_port_mode }}"
           if [[ -z "$BBRV3_PORT_MODE" ]]; then
             BBRV3_PORT_MODE="full"
           fi
-          echo "BBRV3_TAG=$BBRV3_REF" >> $GITHUB_ENV
+          echo "BBRV3_REF=$BBRV3_REF" >> $GITHUB_ENV
           echo "BBRV3_PORT_MODE=$BBRV3_PORT_MODE" >> $GITHUB_ENV
-          echo "正在尝试移植 BBRv3，来源: $BBRV3_REF，模式: $BBRV3_PORT_MODE"
+          echo "BBRV3_STRICT_FULL=false" >> $GITHUB_ENV
+          echo "正在尝试移植 BBRv3，固定来源: $BBRV3_REF，模式: $BBRV3_PORT_MODE"
+
           if ! git clone --depth=1 --branch "$BBRV3_REF" https://github.com/google/bbr.git bbrv3-src; then
-            echo "::warning::未找到 ref=$BBRV3_REF，回退到 v3 分支"
-            git clone --depth=1 --branch v3 https://github.com/google/bbr.git bbrv3-src
+            echo "::error::clone google/bbr failed, ref=$BBRV3_REF"
+            exit 1
           fi
 
           bbrv3_files_compat=(
@@ -591,18 +585,39 @@ jobs:
             include/uapi/linux/inet_diag.h
           )
           bbrv3_files_full=(
+            net/ipv4/Kconfig
+            include/net/tcp.h
+            include/net/inet_connection_sock.h
             include/uapi/linux/inet_diag.h
+            include/uapi/linux/tcp.h
+            include/uapi/linux/rtnetlink.h
+            include/linux/tcp.h
+            net/ipv4/tcp.c
             net/ipv4/tcp_bbr.c
+            net/ipv4/tcp_input.c
+            net/ipv4/tcp_output.c
+            net/ipv4/tcp_rate.c
+            net/ipv4/tcp_cong.c
+            net/ipv4/tcp_minisocks.c
           )
+
           if [[ "$BBRV3_PORT_MODE" == "full" ]]; then
             bbrv3_files=("${bbrv3_files_full[@]}")
+            strict_required=true
             echo "BBRV3_FULLSTACK_SYNC=true" >> $GITHUB_ENV
-          else
+            echo "BBRV3_STRICT_FULL=true" >> $GITHUB_ENV
+            echo "BBRv3 strict full port enabled"
+          elif [[ "$BBRV3_PORT_MODE" == "compat" ]]; then
             bbrv3_files=("${bbrv3_files_compat[@]}")
+            strict_required=false
+          else
+            echo "::error::invalid bbrv3_port_mode=$BBRV3_PORT_MODE"
+            exit 1
           fi
 
+          sync_total=${#bbrv3_files[@]}
           sync_ok=0
-          sync_skip=0
+          sync_fail=0
           for rel in "${bbrv3_files[@]}"; do
             if [[ -f "bbrv3-src/$rel" ]]; then
               mkdir -p "common/$(dirname "$rel")"
@@ -610,89 +625,16 @@ jobs:
               echo "已同步 $rel"
               sync_ok=$((sync_ok + 1))
             else
-              echo "::warning::BBRv3 源缺少文件，跳过 $rel"
-              sync_skip=$((sync_skip + 1))
-            fi
-          done
-          echo "BBRv3 文件同步完成: ok=$sync_ok skip=$sync_skip mode=$BBRV3_PORT_MODE"
-
-          if [[ "$BBRV3_PORT_MODE" == "full" ]]; then
-            if [[ -f common/include/net/netns/ipv4.h && -f common/include/net/inet_connection_sock.h ]]; then
-              if ! grep -q "sysctl_tcp_pingpong_thresh" common/include/net/netns/ipv4.h && grep -q "sysctl_tcp_plb_cong_thresh" common/include/net/netns/ipv4.h; then
-                sed -i 's/sysctl_tcp_pingpong_thresh/sysctl_tcp_plb_cong_thresh/g' common/include/net/inet_connection_sock.h
+              sync_fail=$((sync_fail + 1))
+              if [[ "$strict_required" == "true" ]]; then
+                echo "::error::strict full missing source file: $rel"
+                exit 1
+              else
+                echo "::warning::BBRv3 源缺少文件，跳过 $rel"
               fi
             fi
-            if [[ -f common/include/linux/cache.h ]] && ! grep -q "__cacheline_group_begin" common/include/linux/cache.h; then
-              {
-                echo ""
-                echo "/* BBRv3 fullstack compat for vendor trees lacking cacheline group helpers. */"
-                echo "#ifndef __cacheline_group_begin"
-                echo "#define __cacheline_group_begin(GROUP) unsigned char __cacheline_group_begin__##GROUP[0]"
-                echo "#endif"
-                echo "#ifndef __cacheline_group_end"
-                echo "#define __cacheline_group_end(GROUP) unsigned char __cacheline_group_end__##GROUP[0]"
-                echo "#endif"
-                echo "#ifndef CACHELINE_ASSERT_GROUP_MEMBER"
-                echo "#define CACHELINE_ASSERT_GROUP_MEMBER(TYPE, GROUP, MEMBER)"
-                echo "#endif"
-                echo "#ifndef CACHELINE_ASSERT_GROUP_SIZE"
-                echo "#define CACHELINE_ASSERT_GROUP_SIZE(TYPE, GROUP, SIZE)"
-                echo "#endif"
-              } >> common/include/linux/cache.h
-            fi
-            if [[ ! -f common/include/net/tcp_ao.h ]]; then
-              {
-                echo "/* BBRv3 fullstack compat stub for vendor trees without TCP-AO support. */"
-                echo "#ifndef _NET_TCP_AO_H"
-                echo "#define _NET_TCP_AO_H"
-                echo ""
-                echo "struct sock;"
-                echo "struct tcp_sock;"
-                echo "struct request_sock;"
-                echo "struct sk_buff;"
-                echo "struct tcp_ao_key;"
-                echo "struct tcp_ao_info;"
-                echo ""
-                echo "#endif /* _NET_TCP_AO_H */"
-              } > common/include/net/tcp_ao.h
-            fi
-            if [[ -f common/net/ipv4/tcp_bbr.c && -f common/include/linux/btf_ids.h ]] && ! grep -q "BTF_KFUNCS_START" common/include/linux/btf_ids.h; then
-              sed -i 's/BTF_KFUNCS_START(/BTF_SET8_START(/g; s/BTF_KFUNCS_END(/BTF_SET8_END(/g' common/net/ipv4/tcp_bbr.c
-            fi
-            if [[ ! -f common/include/net/proto_memory.h ]]; then
-              {
-                echo "/* BBRv3 fullstack compat stub for vendor trees without proto_memory helpers. */"
-                echo "#ifndef _NET_PROTO_MEMORY_H"
-                echo "#define _NET_PROTO_MEMORY_H"
-                echo "#endif /* _NET_PROTO_MEMORY_H */"
-              } > common/include/net/proto_memory.h
-            fi
-            if [[ ! -f common/include/linux/unaligned.h ]]; then
-              {
-                echo "/* BBRv3 fullstack compat stub for vendor trees without linux/unaligned.h. */"
-                echo "#ifndef _LINUX_UNALIGNED_H"
-                echo "#define _LINUX_UNALIGNED_H"
-                echo "#include <asm/unaligned.h>"
-                echo "#endif /* _LINUX_UNALIGNED_H */"
-              } > common/include/linux/unaligned.h
-            fi
-            if [[ ! -f common/include/linux/skbuff_ref.h ]]; then
-              {
-                echo "/* BBRv3 fullstack compat stub for vendor trees without linux/skbuff_ref.h. */"
-                echo "#ifndef _LINUX_SKBUFF_REF_H"
-                echo "#define _LINUX_SKBUFF_REF_H"
-                echo "#include <linux/types.h>"
-                echo "struct sk_buff;"
-                echo "#endif /* _LINUX_SKBUFF_REF_H */"
-              } > common/include/linux/skbuff_ref.h
-            fi
-            if [[ -f common/include/net/tcp.h ]] && grep -q "tw_usec_ts" common/include/net/tcp.h; then
-              sed -E -i 's/tcp_clock_ts\(tcptw->[^)]*tw_usec_ts\)[[:space:]]*\+[[:space:]]*tcptw->tw_ts_offset/0/g' common/include/net/tcp.h
-            fi
-            if [[ -f common/include/net/tcp.h ]] && grep -q "skb_frags_readable(" common/include/net/tcp.h; then
-              sed -E -i 's/skb_frags_readable\([^)]*\)[[:space:]]*==[[:space:]]*skb_frags_readable\([^)]*\)/1/g' common/include/net/tcp.h
-            fi
-          fi
+          done
+          echo "BBRv3 文件同步统计: total=$sync_total ok=$sync_ok fail=$sync_fail mode=$BBRV3_PORT_MODE"
 
           if [[ ! -f common/net/ipv4/tcp_bbr.c ]]; then
             echo "::error::missing common/net/ipv4/tcp_bbr.c"
@@ -701,10 +643,47 @@ jobs:
 
           if [[ "$BBRV3_PORT_MODE" == "full" ]]; then
             python - <<'PY'
+          import re
+          from pathlib import Path
+
+          checks = [
+              ("common/net/ipv4/tcp_bbr.c", r"TCP_CONG_WANTS_CE_EVENTS", "tcp_bbr.c missing TCP_CONG_WANTS_CE_EVENTS"),
+              ("common/net/ipv4/tcp_bbr.c", r"\.tso_segs\s*=\s*bbr_tso_segs", "tcp_bbr.c missing .tso_segs = bbr_tso_segs"),
+              ("common/net/ipv4/tcp_bbr.c", r"\.skb_marked_lost\s*=\s*bbr_skb_marked_lost", "tcp_bbr.c missing .skb_marked_lost = bbr_skb_marked_lost"),
+              ("common/net/ipv4/tcp_bbr.c", r"bbr_main\s*\([^)]*\back\b[^)]*\bflag\b[^)]*\)", "tcp_bbr.c missing bbr_main(ack/flag) signature path"),
+              ("common/include/net/tcp.h", r"TCP_CONG_WANTS_CE_EVENTS", "include/net/tcp.h missing TCP_CONG_WANTS_CE_EVENTS"),
+              ("common/include/net/tcp.h", r"\btx_in_flight\b", "include/net/tcp.h missing rate_sample.tx_in_flight"),
+              ("common/include/net/tcp.h", r"\bis_acking_tlp_retrans_seq\b", "include/net/tcp.h missing rate_sample.is_acking_tlp_retrans_seq"),
+              ("common/include/net/tcp.h", r"\bis_ece\b", "include/net/tcp.h missing rate_sample.is_ece"),
+              ("common/include/net/tcp.h", r"\btso_segs\b", "include/net/tcp.h missing tcp_congestion_ops.tso_segs callback"),
+              ("common/include/net/tcp.h", r"\bskb_marked_lost\b", "include/net/tcp.h missing tcp_congestion_ops.skb_marked_lost callback"),
+              ("common/include/net/tcp.h", r"cong_control\)\(struct sock \*sk,\s*u32 ack,\s*int flag,\s*const struct rate_sample \*rs\)", "include/net/tcp.h missing new cong_control signature"),
+              ("common/include/uapi/linux/tcp.h", r"TCPI_OPT_ECN_LOW", "include/uapi/linux/tcp.h missing TCPI_OPT_ECN_LOW"),
+              ("common/include/uapi/linux/rtnetlink.h", r"RTAX_FEATURE_ECN_LOW", "include/uapi/linux/rtnetlink.h missing RTAX_FEATURE_ECN_LOW"),
+          ]
+
+          errors = []
+          for path_str, pattern, msg in checks:
+              path = Path(path_str)
+              if not path.exists():
+                  errors.append(f"{path_str} not found")
+                  continue
+              text = path.read_text(encoding="utf-8", errors="ignore")
+              if not re.search(pattern, text, flags=re.S):
+                  errors.append(msg)
+
+          if errors:
+              for err in errors:
+                  print(f"::error::{err}")
+              raise SystemExit(1)
+          print("BBRv3 strict full text/symbol checks passed")
+          PY
+
+            python - <<'PY'
           from pathlib import Path
           p = Path("common/net/ipv4/tcp_bbr.c")
           s = p.read_text(encoding="utf-8")
-          marker = 'pr_info("tcp_bbr: BBRv3 patched (fullstack)\\n");'
+          marker = 'pr_info("tcp_bbr: BBRv3 patched (full strict)\\n");'
           if marker not in s:
             line = "\treturn tcp_register_congestion_control(&tcp_bbr_cong_ops);"
             if line in s:
@@ -712,52 +691,56 @@ jobs:
             elif "return tcp_register_congestion_control(&tcp_bbr_cong_ops);" in s:
               s = s.replace("return tcp_register_congestion_control(&tcp_bbr_cong_ops);", marker + "\n\treturn tcp_register_congestion_control(&tcp_bbr_cong_ops);", 1)
             else:
-              raise SystemExit("BBRv3 marker inject failed: register call not found")
+              raise SystemExit("BBRv3 full strict marker inject failed: register call not found")
           p.write_text(s, encoding="utf-8")
           PY
-          fi
 
-          # 6.x compat: trim hard deps from BBRv3 (PLB/BPF kfunc/TLP symbols)
-          if ! grep -q "BBRv3 compat for older 6.x vendor trees" common/net/ipv4/tcp_bbr.c; then
-            awk '
-                { print }
-                $0 == "#include \"tcp_dctcp.h\"" {
-                  print ""
-                  print "/* BBRv3 compat for older 6.x vendor trees (no PLB/BPF kfunc/TLP event). */"
-                  print "#ifndef __bpf_kfunc"
-                  print "#define __bpf_kfunc"
-                  print "#endif"
-                  print "#ifndef TCP_ECN_LOW"
-                  print "#define TCP_ECN_LOW 0"
-                  print "#endif"
-                  print "#ifndef TCP_ECN_ECT_PERMANENT"
-                  print "#define TCP_ECN_ECT_PERMANENT 0"
-                  print "#endif"
-                  print "#ifndef CA_EVENT_TLP_RECOVERY"
-                  print "#define CA_EVENT_TLP_RECOVERY ((enum tcp_ca_event)-1)"
-                  print "#endif"
-                  print "#ifndef TCP_PLB_SCALE"
-                  print "#define TCP_PLB_SCALE BBR_SCALE"
-                  print "struct tcp_plb_state {"
-                  print "\tu32 pause_until;"
-                  print "};"
-                  print "static inline void tcp_plb_update_state(struct sock *sk, struct tcp_plb_state *plb, int ce_ratio) { }"
-                  print "static inline void tcp_plb_check_rehash(struct sock *sk, struct tcp_plb_state *plb) { }"
-                  print "static inline void tcp_plb_update_state_upon_rto(struct sock *sk, struct tcp_plb_state *plb) { }"
-                  print "#endif"
-                  print ""
-                  print "/* vendor compat helpers for rate_sample/tcp_skb_cb API differences. */"
-                  print "static inline u32 bbr_rs_tx_in_flight(const struct rate_sample *rs) { return rs->prior_in_flight; }"
-                  print "static inline s32 bbr_rs_lost(const struct rate_sample *rs) { return rs->losses; }"
-                  print "static inline bool bbr_rs_is_ece(const struct rate_sample *rs) { return false; }"
-                  print "static inline bool bbr_rs_is_acking_tlp_retrans_seq(const struct rate_sample *rs) { return false; }"
-                  print "static inline bool bbr_tcp_skb_tx_in_flight_is_suspicious(u32 skb_pcount, u8 skb_sacked_flags, u32 tx_in_flight) { return false; }"
-                }
-              ' common/net/ipv4/tcp_bbr.c > common/net/ipv4/tcp_bbr.c.new
-            mv common/net/ipv4/tcp_bbr.c.new common/net/ipv4/tcp_bbr.c
-          fi
+            if ! grep -q "BBRv3 patched (full strict)" common/net/ipv4/tcp_bbr.c; then
+              echo "::error::BBRv3 full strict marker inject failed"
+              exit 1
+            fi
+          else
+            # 6.x compat: trim hard deps from BBRv3 (PLB/BPF kfunc/TLP symbols)
+            if ! grep -q "BBRv3 compat for older 6.x vendor trees" common/net/ipv4/tcp_bbr.c; then
+              awk '
+                  { print }
+                  $0 == "#include \"tcp_dctcp.h\"" {
+                    print ""
+                    print "/* BBRv3 compat for older 6.x vendor trees (no PLB/BPF kfunc/TLP event). */"
+                    print "#ifndef __bpf_kfunc"
+                    print "#define __bpf_kfunc"
+                    print "#endif"
+                    print "#ifndef TCP_ECN_LOW"
+                    print "#define TCP_ECN_LOW 0"
+                    print "#endif"
+                    print "#ifndef TCP_ECN_ECT_PERMANENT"
+                    print "#define TCP_ECN_ECT_PERMANENT 0"
+                    print "#endif"
+                    print "#ifndef CA_EVENT_TLP_RECOVERY"
+                    print "#define CA_EVENT_TLP_RECOVERY ((enum tcp_ca_event)-1)"
+                    print "#endif"
+                    print "#ifndef TCP_PLB_SCALE"
+                    print "#define TCP_PLB_SCALE BBR_SCALE"
+                    print "struct tcp_plb_state {"
+                    print "\tu32 pause_until;"
+                    print "};"
+                    print "static inline void tcp_plb_update_state(struct sock *sk, struct tcp_plb_state *plb, int ce_ratio) { }"
+                    print "static inline void tcp_plb_check_rehash(struct sock *sk, struct tcp_plb_state *plb) { }"
+                    print "static inline void tcp_plb_update_state_upon_rto(struct sock *sk, struct tcp_plb_state *plb) { }"
+                    print "#endif"
+                    print ""
+                    print "/* vendor compat helpers for rate_sample/tcp_skb_cb API differences. */"
+                    print "static inline u32 bbr_rs_tx_in_flight(const struct rate_sample *rs) { return rs->prior_in_flight; }"
+                    print "static inline s32 bbr_rs_lost(const struct rate_sample *rs) { return rs->losses; }"
+                    print "static inline bool bbr_rs_is_ece(const struct rate_sample *rs) { return false; }"
+                    print "static inline bool bbr_rs_is_acking_tlp_retrans_seq(const struct rate_sample *rs) { return false; }"
+                    print "static inline bool bbr_tcp_skb_tx_in_flight_is_suspicious(u32 skb_pcount, u8 skb_sacked_flags, u32 tx_in_flight) { return false; }"
+                  }
+                ' common/net/ipv4/tcp_bbr.c > common/net/ipv4/tcp_bbr.c.new
+              mv common/net/ipv4/tcp_bbr.c.new common/net/ipv4/tcp_bbr.c
+            fi
 
-          python -c 'from pathlib import Path; p=Path("common/net/ipv4/tcp_bbr.c"); s=p.read_text(encoding="utf-8"); s=s.replace("struct net *net = sock_net(sk);","struct net *net __maybe_unused = sock_net(sk);"); s=s.replace("READ_ONCE(net->ipv4.sysctl_tcp_plb_enabled)","0"); reps=[("rs->tx_in_flight","bbr_rs_tx_in_flight(rs)"),("rs->lost","bbr_rs_lost(rs)"),("rs->is_ece","bbr_rs_is_ece(rs)"),("rs->is_acking_tlp_retrans_seq","bbr_rs_is_acking_tlp_retrans_seq(rs)"),("rs.tx_in_flight","rs.prior_in_flight"),("rs.lost","rs.losses"),("TCP_SKB_CB(skb)->tx.lost","0"),("scb->tx.in_flight","bbr->inflight_latest"),("scb->tx.lost","0"),("tp->tlp_orig_data_app_limited","0"),("tp->fast_ack_mode = bbr_fast_ack_mode ? 1 : 0;","(void)bbr_fast_ack_mode;")]; [s:=s.replace(a,b) for a,b in reps]; s=s.replace("bbr_tcp_skb_tx_in_flight_is_suspicious(", "__BBR_TMP_TXINF__("); s=s.replace("tcp_skb_tx_in_flight_is_suspicious(", "bbr_tcp_skb_tx_in_flight_is_suspicious("); s=s.replace("__BBR_TMP_TXINF__(", "bbr_tcp_skb_tx_in_flight_is_suspicious("); s=s.replace("| TCP_CONG_WANTS_CE_EVENTS",""); s=s.replace(".tso_segs\t\t= bbr_tso_segs,",".min_tso_segs\t= bbr_min_tso_segs_compat,"); s=s.replace(".tso_segs\t= bbr_tso_segs,",".min_tso_segs\t= bbr_min_tso_segs_compat,"); s=s.replace(".min_tso_segs\t= bbr_tso_segs,",".min_tso_segs\t= bbr_min_tso_segs_compat,"); s=s.replace(".min_tso_segs = bbr_tso_segs,",".min_tso_segs = bbr_min_tso_segs_compat,"); s="\n".join(line for line in s.splitlines() if ".skb_marked_lost" not in line)+"\n"; s=s.replace("BTF_KFUNCS_START(","BTF_SET8_START(").replace("BTF_KFUNCS_END(","BTF_SET8_END("); s=s.replace(".cong_control\t= bbr_main,",".cong_control\t= bbr_main_compat,"); s=s.replace(".cong_control = bbr_main,",".cong_control\t= bbr_main_compat,"); needle="static struct tcp_congestion_ops tcp_bbr_cong_ops __read_mostly = {"; main_wrap="static void bbr_main_compat(struct sock *sk, const struct rate_sample *rs)\n{\n\tbbr_main(sk, 0, 0, rs);\n}\n\n"; min_wrap="static u32 bbr_min_tso_segs_compat(struct sock *sk)\n{\n\treturn bbr_tso_segs(sk, tcp_sk(sk)->mss_cache);\n}\n\n"; s=s if ("static u32 bbr_min_tso_segs_compat(struct sock *sk)" in s or needle not in s) else s.replace(needle, min_wrap+needle, 1); s=s if ("static void bbr_main_compat(struct sock *sk, const struct rate_sample *rs)" in s or needle not in s) else s.replace(needle, main_wrap+needle, 1); p.write_text(s, encoding="utf-8")'
+            python -c 'from pathlib import Path; p=Path("common/net/ipv4/tcp_bbr.c"); s=p.read_text(encoding="utf-8"); s=s.replace("struct net *net = sock_net(sk);","struct net *net __maybe_unused = sock_net(sk);"); s=s.replace("READ_ONCE(net->ipv4.sysctl_tcp_plb_enabled)","0"); reps=[("rs->tx_in_flight","bbr_rs_tx_in_flight(rs)"),("rs->lost","bbr_rs_lost(rs)"),("rs->is_ece","bbr_rs_is_ece(rs)"),("rs->is_acking_tlp_retrans_seq","bbr_rs_is_acking_tlp_retrans_seq(rs)"),("rs.tx_in_flight","rs.prior_in_flight"),("rs.lost","rs.losses"),("TCP_SKB_CB(skb)->tx.lost","0"),("scb->tx.in_flight","bbr->inflight_latest"),("scb->tx.lost","0"),("tp->tlp_orig_data_app_limited","0"),("tp->fast_ack_mode = bbr_fast_ack_mode ? 1 : 0;","(void)bbr_fast_ack_mode;")]; [s:=s.replace(a,b) for a,b in reps]; s=s.replace("bbr_tcp_skb_tx_in_flight_is_suspicious(", "__BBR_TMP_TXINF__("); s=s.replace("tcp_skb_tx_in_flight_is_suspicious(", "bbr_tcp_skb_tx_in_flight_is_suspicious("); s=s.replace("__BBR_TMP_TXINF__(", "bbr_tcp_skb_tx_in_flight_is_suspicious("); s=s.replace("| TCP_CONG_WANTS_CE_EVENTS",""); s=s.replace(".tso_segs\t\t= bbr_tso_segs,",".min_tso_segs\t= bbr_min_tso_segs_compat,"); s=s.replace(".tso_segs\t= bbr_tso_segs,",".min_tso_segs\t= bbr_min_tso_segs_compat,"); s=s.replace(".min_tso_segs\t= bbr_tso_segs,",".min_tso_segs\t= bbr_min_tso_segs_compat,"); s=s.replace(".min_tso_segs = bbr_tso_segs,",".min_tso_segs = bbr_min_tso_segs_compat,"); s="\n".join(line for line in s.splitlines() if ".skb_marked_lost" not in line)+"\n"; s=s.replace("BTF_KFUNCS_START(","BTF_SET8_START(").replace("BTF_KFUNCS_END(","BTF_SET8_END("); s=s.replace(".cong_control\t= bbr_main,",".cong_control\t= bbr_main_compat,"); s=s.replace(".cong_control = bbr_main,",".cong_control\t= bbr_main_compat,"); needle="static struct tcp_congestion_ops tcp_bbr_cong_ops __read_mostly = {"; main_wrap="static void bbr_main_compat(struct sock *sk, const struct rate_sample *rs)\n{\n\tbbr_main(sk, 0, 0, rs);\n}\n\n"; min_wrap="static u32 bbr_min_tso_segs_compat(struct sock *sk)\n{\n\treturn bbr_tso_segs(sk, tcp_sk(sk)->mss_cache);\n}\n\n"; s=s if ("static u32 bbr_min_tso_segs_compat(struct sock *sk)" in s or needle not in s) else s.replace(needle, min_wrap+needle, 1); s=s if ("static void bbr_main_compat(struct sock *sk, const struct rate_sample *rs)" in s or needle not in s) else s.replace(needle, main_wrap+needle, 1); p.write_text(s, encoding="utf-8")'
 
             python - <<'PY'
           from pathlib import Path
@@ -775,19 +758,22 @@ jobs:
           p.write_text(s, encoding="utf-8")
           PY
 
-          # struct bbr is larger on newer upstream; enlarge CA private storage on vendor trees.
-          if [[ -f common/include/net/inet_connection_sock.h ]]; then
-            sed -ri "s/(icsk_ca_priv\\[)104([[:space:]]*\\/[[:space:]]*sizeof\\(u64\\)\\];)/\\1160\\2/" common/include/net/inet_connection_sock.h
-            sed -ri "s/(icsk_ca_priv\\[)128([[:space:]]*\\/[[:space:]]*sizeof\\(u64\\)\\];)/\\1160\\2/" common/include/net/inet_connection_sock.h
-          fi
+            # struct bbr is larger on newer upstream; enlarge CA private storage on vendor trees.
+            if [[ -f common/include/net/inet_connection_sock.h ]]; then
+              sed -ri "s/(icsk_ca_priv\\[)104([[:space:]]*\\/[[:space:]]*sizeof\\(u64\\)\\];)/\\1160\\2/" common/include/net/inet_connection_sock.h
+              sed -ri "s/(icsk_ca_priv\\[)128([[:space:]]*\\/[[:space:]]*sizeof\\(u64\\)\\];)/\\1160\\2/" common/include/net/inet_connection_sock.h
+            fi
 
-          if [[ "$BBRV3_PORT_MODE" != "full" ]]; then
             if grep -q "sysctl_tcp_plb_enabled" common/net/ipv4/tcp_bbr.c; then
               echo "::error::BBRv3 compat patch failed: sysctl_tcp_plb_enabled still present"
               exit 1
             fi
             if grep -Eq "rs->tx_in_flight|rs->lost|rs->is_ece|rs->is_acking_tlp_retrans_seq|scb->tx.in_flight|scb->tx.lost|TCP_SKB_CB\\(skb\\)->tx.lost|tp->fast_ack_mode|tp->tlp_orig_data_app_limited|TCP_CONG_WANTS_CE_EVENTS|\\.tso_segs\\s*=|\\.min_tso_segs\\s*=\\s*bbr_tso_segs|\\.skb_marked_lost\\s*=|BTF_KFUNCS_START|BTF_KFUNCS_END|bbr_bbr_tcp_skb_tx_in_flight_is_suspicious" common/net/ipv4/tcp_bbr.c; then
               echo "::error::BBRv3 compat patch failed: unresolved incompat symbols still present"
+              exit 1
+            fi
+            if ! grep -q "BBRv3 patched (compat)" common/net/ipv4/tcp_bbr.c; then
+              echo "::error::BBRv3 marker inject failed"
               exit 1
             fi
           fi
@@ -798,18 +784,6 @@ jobs:
           else
             echo "::error::未检测到 BBRv3 特征符号，终止构建"
             exit 1
-          fi
-
-          if [[ "$BBRV3_PORT_MODE" == "full" ]]; then
-            if ! grep -q "BBRv3 patched (fullstack)" common/net/ipv4/tcp_bbr.c; then
-              echo "::error::BBRv3 fullstack marker inject failed"
-              exit 1
-            fi
-          else
-            if ! grep -q "BBRv3 patched (compat)" common/net/ipv4/tcp_bbr.c; then
-              echo "::error::BBRv3 marker inject failed"
-              exit 1
-            fi
           fi
 
       - name: 添加 BBR 等一系列拥塞控制算法
@@ -910,7 +884,7 @@ jobs:
           make LLVM=1 ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- O=out KCFLAGS+=-O2 KCFLAGS+=-Wno-error gki_defconfig
           if [[ "${BBRV3_PORT_MODE}" == "full" ]]; then
             echo "BBRv3 full-stack quick object build check..."
-            make -j$(nproc --all) LLVM=1 ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- O=out KCFLAGS+=-O2 KCFLAGS+=-Wno-error net/ipv4/tcp_bbr.o net/ipv4/tcp_rate.o net/ipv4/tcp_input.o net/ipv4/tcp_output.o net/ipv4/tcp_cong.o net/ipv4/tcp_timer.o
+            make -j$(nproc --all) LLVM=1 ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- O=out KCFLAGS+=-O2 KCFLAGS+=-Wno-error net/ipv4/tcp_bbr.o net/ipv4/tcp_rate.o net/ipv4/tcp_input.o net/ipv4/tcp_output.o net/ipv4/tcp_cong.o net/ipv4/tcp_minisocks.o net/ipv4/tcp.o net/ipv4/tcp_diag.o net/ipv4/route.o
           else
             make -j$(nproc --all) LLVM=1 ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- O=out KCFLAGS+=-O2 KCFLAGS+=-Wno-error net/ipv4/tcp_bbr.o
           fi
@@ -1125,8 +1099,9 @@ jobs:
             - 网络功能增强：${{ github.event.inputs.better_net }}
             - BBR/Brutal 等拥塞控制算法支持：${{ github.event.inputs.bbr_enable }}
             - BBRv3 auto port: ${{ github.event.inputs.bbrv3_auto }}
-            - BBRv3 ref/tag: ${{ github.event.inputs.bbrv3_tag }}
+            - BBRv3 fixed ref/tag: bbrv3-2025-03-18
             - BBRv3 port mode: ${{ github.event.inputs.bbrv3_port_mode }}
+            - BBRv3 strict full port enabled: ${{ github.event.inputs.bbrv3_auto && github.event.inputs.bbr_enable != 'false' && github.event.inputs.bbrv3_port_mode == 'full' }}
             - ADIOS IO调度器支持：${{ github.event.inputs.adios_enable }}
             - Re-Kernel支持：${{ github.event.inputs.rekernel_enable }}
             - 内核级基带保护支持：${{ github.event.inputs.baseband_guard }}
