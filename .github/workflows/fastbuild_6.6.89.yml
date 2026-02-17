@@ -646,6 +646,12 @@ jobs:
                 echo "BBRv3 full bridge: sysctl_tcp_pingpong_thresh -> sysctl_tcp_plb_cong_thresh"
               fi
             fi
+            if [[ -f common/include/net/inet_connection_sock.h && -f common/include/net/tls.h ]]; then
+              if grep -q "container_of_const(ptr, struct inet_connection_sock, icsk_inet.sk)" common/include/net/inet_connection_sock.h; then
+                sed -E -i 's/struct[[:space:]]+inet_connection_sock[[:space:]]*\\*[[:space:]]*icsk[[:space:]]*=[[:space:]]*inet_csk\\(sk\\);/const struct inet_connection_sock *icsk = inet_csk(sk);/g' common/include/net/tls.h
+                echo "BBRv3 full bridge: adjusted inet_csk() constness in include/net/tls.h"
+              fi
+            fi
             # vendor bridge: provide cacheline group helpers if base tree lacks them
             if [[ -f common/include/linux/cache.h ]] && ! grep -q "__cacheline_group_begin" common/include/linux/cache.h; then
               {
