@@ -664,6 +664,53 @@ jobs:
               } >> common/include/linux/cache.h
               echo "BBRv3 full bridge: injected cacheline group helper compatibility macros"
             fi
+            if [[ ! -f common/include/net/tcp_ao.h ]]; then
+              {
+                echo "/* BBRv3 full bridge for vendor trees without TCP-AO support. */"
+                echo "#ifndef _NET_TCP_AO_H"
+                echo "#define _NET_TCP_AO_H"
+                echo ""
+                echo "struct sock;"
+                echo "struct tcp_sock;"
+                echo "struct request_sock;"
+                echo "struct sk_buff;"
+                echo "struct tcp_ao_key;"
+                echo "struct tcp_ao_info;"
+                echo ""
+                echo "#endif /* _NET_TCP_AO_H */"
+              } > common/include/net/tcp_ao.h
+              echo "BBRv3 full bridge: created include/net/tcp_ao.h"
+            fi
+            if [[ ! -f common/include/net/proto_memory.h ]]; then
+              {
+                echo "/* BBRv3 full bridge for vendor trees without proto_memory helpers. */"
+                echo "#ifndef _NET_PROTO_MEMORY_H"
+                echo "#define _NET_PROTO_MEMORY_H"
+                echo "#endif /* _NET_PROTO_MEMORY_H */"
+              } > common/include/net/proto_memory.h
+              echo "BBRv3 full bridge: created include/net/proto_memory.h"
+            fi
+            if [[ ! -f common/include/linux/unaligned.h ]]; then
+              {
+                echo "/* BBRv3 full bridge for vendor trees without linux/unaligned.h. */"
+                echo "#ifndef _LINUX_UNALIGNED_H"
+                echo "#define _LINUX_UNALIGNED_H"
+                echo "#include <asm/unaligned.h>"
+                echo "#endif /* _LINUX_UNALIGNED_H */"
+              } > common/include/linux/unaligned.h
+              echo "BBRv3 full bridge: created include/linux/unaligned.h"
+            fi
+            if [[ ! -f common/include/linux/skbuff_ref.h ]]; then
+              {
+                echo "/* BBRv3 full bridge for vendor trees without linux/skbuff_ref.h. */"
+                echo "#ifndef _LINUX_SKBUFF_REF_H"
+                echo "#define _LINUX_SKBUFF_REF_H"
+                echo "#include <linux/types.h>"
+                echo "struct sk_buff;"
+                echo "#endif /* _LINUX_SKBUFF_REF_H */"
+              } > common/include/linux/skbuff_ref.h
+              echo "BBRv3 full bridge: created include/linux/skbuff_ref.h"
+            fi
           fi
 
           if [[ ! -f common/net/ipv4/tcp_bbr.c ]]; then
