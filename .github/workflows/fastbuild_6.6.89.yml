@@ -649,6 +649,65 @@ jobs:
           echo "BBRv3 文件同步统计: total=$sync_total ok=$sync_ok fail=$sync_fail mode=$BBRV3_PORT_MODE"
 
           if [[ "$BBRV3_PORT_MODE" == "full" ]]; then
+            if [[ -f common/net/ipv4/tcp_timer.c ]] && grep -q "mptcp_active_detect_blackhole" common/net/ipv4/tcp_timer.c; then
+              sed -i 's/mptcp_active_detect_blackhole(/tcp_fastopen_active_detect_blackhole(/g' common/net/ipv4/tcp_timer.c
+              echo "BBRv3 full bridge: mapped mptcp_active_detect_blackhole() -> tcp_fastopen_active_detect_blackhole()"
+            fi
+            if [[ -f common/net/ipv4/tcp_offload.c ]]; then
+              python - <<'PY'
+          from pathlib import Path
+          p = Path("common/net/ipv4/tcp_offload.c")
+          s = p.read_text(encoding="utf-8", errors="ignore")
+          changed = False
+
+          replacements = [
+              ("skb_gro_may_pull(skb, hlen)", "pskb_may_pull(skb, hlen)"),
+              ("gro_receive_network_flush(th, th2, p)", "0"),
+              ("skb_gro_receive_list(p, skb)", "skb_gro_receive(p, skb)"),
+              ("NAPI_GRO_CB(skb)->ip_fixedid", "0"),
+              ("net_hotdata.tcpv4_offload", "tcpv4_offload"),
+              ("return tcp_gro_receive(head, skb);", "return tcp_gro_receive(head, skb, th);"),
+          ]
+          for old, new in replacements:
+              if old in s:
+                  s = s.replace(old, new)
+                  changed = True
+
+          if "tcpv4_offload = (struct net_offload)" in s and "static struct net_offload tcpv4_offload __read_mostly;" not in s:
+              marker = "int __init tcpv4_offload_init(void)\n{"
+              if marker in s:
+                  s = s.replace(marker, "static struct net_offload tcpv4_offload __read_mostly;\n\n" + marker, 1)
+                  changed = True
+
+          if changed:
+              p.write_text(s, encoding="utf-8")
+              print("BBRv3 full bridge: applied tcp_offload.c ABI adaptations for 6.6 vendor tree")
+          PY
+            fi
+            if [[ -f common/net/ipv4/bpf_tcp_ca.c ]]; then
+              if [[ ! -f common/include/linux/bpf.h ]] || ! grep -q "register_bpf_struct_ops" common/include/linux/bpf.h; then
+                cat > common/net/ipv4/bpf_tcp_ca.c <<'EOF'
+          /* BBRv3 full bridge: kernel tree lacks BPF TCP CA struct_ops APIs, keep a no-op unit. */
+          #include <linux/init.h>
+
+          static int __init bpf_tcp_ca_kfunc_init(void)
+          {
+          	return 0;
+          }
+          late_initcall(bpf_tcp_ca_kfunc_init);
+          EOF
+                echo "BBRv3 full bridge: replaced bpf_tcp_ca.c with no-op stub (missing register_bpf_struct_ops)"
+              else
+                if [[ -f common/include/linux/btf_ids.h ]] && ! grep -q "BTF_KFUNCS_START" common/include/linux/btf_ids.h; then
+                  sed -i 's/BTF_KFUNCS_START(/BTF_SET8_START(/g; s/BTF_KFUNCS_END(/BTF_SET8_END(/g' common/net/ipv4/bpf_tcp_ca.c
+                  echo "BBRv3 full bridge: mapped BTF_KFUNCS_* to BTF_SET8_* in bpf_tcp_ca.c"
+                fi
+                if grep -q "bpf_base_func_proto(func_id, prog)" common/net/ipv4/bpf_tcp_ca.c && grep -q "bpf_base_func_proto(enum bpf_func_id func_id)" common/include/linux/bpf.h; then
+                  sed -i 's/bpf_base_func_proto(func_id, prog)/bpf_base_func_proto(func_id)/g' common/net/ipv4/bpf_tcp_ca.c
+                  echo "BBRv3 full bridge: downgraded bpf_base_func_proto() call signature in bpf_tcp_ca.c"
+                fi
+              fi
+            fi
             # vendor bridge: some trees renamed pingpong thresh to plb_cong_thresh
             if [[ -f common/include/net/netns/ipv4.h && -f common/include/net/inet_connection_sock.h ]]; then
               if ! grep -q "sysctl_tcp_pingpong_thresh" common/include/net/netns/ipv4.h && grep -q "sysctl_tcp_plb_cong_thresh" common/include/net/netns/ipv4.h; then
