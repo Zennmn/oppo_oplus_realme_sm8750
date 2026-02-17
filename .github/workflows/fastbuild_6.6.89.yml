@@ -687,8 +687,12 @@ jobs:
             if [[ -f common/net/ipv4/bpf_tcp_ca.c ]]; then
               if [[ ! -f common/include/linux/bpf.h ]] || ! grep -q "register_bpf_struct_ops" common/include/linux/bpf.h; then
                 cat > common/net/ipv4/bpf_tcp_ca.c <<'EOF'
-          /* BBRv3 full bridge: kernel tree lacks BPF TCP CA struct_ops APIs, keep a no-op unit. */
+          /* BBRv3 full bridge: kernel tree lacks BPF TCP CA struct_ops APIs. */
           #include <linux/init.h>
+          #include <linux/bpf.h>
+
+          /* Keep symbol for kernel/bpf/bpf_struct_ops.c reference in old trees. */
+          struct bpf_struct_ops bpf_tcp_congestion_ops;
 
           static int __init bpf_tcp_ca_kfunc_init(void)
           {
@@ -1101,6 +1105,7 @@ jobs:
           s = s.replace("sock_tx_timestamp(sk, sockc, &shinfo->tx_flags);", "sock_tx_timestamp(sk, sockc->tsflags, &shinfo->tx_flags);")
           s = s.replace("SOF_TIMESTAMPING_OPT_RX_FILTER", "0")
           s = s.replace("MSG_SOCK_DEVMEM", "0")
+          s = s.replace("READ_ONCE(net_hotdata.sysctl_max_skb_frags)", "READ_ONCE(sysctl_max_skb_frags)")
           s = s.replace("BUILD_BUG_ON((int)BPF_TCP_BOUND_INACTIVE != (int)TCP_BOUND_INACTIVE);", "")
           s = s.replace("LINUX_MIB_TCPAOBAD", "LINUX_MIB_TCPABORTFAILED")
           marker = "/* batch __xa_alloc() calls and reduce xa_lock()/xa_unlock() overhead. */"
@@ -1117,6 +1122,12 @@ jobs:
               if [[ -f common/include/net/sock.h ]] && ! grep -q "struct sockcm_cookie \\*sockc" common/include/net/sock.h; then
                 sed -i 's/sock_tx_timestamp(sk, sockc, &shinfo->tx_flags);/sock_tx_timestamp(sk, sockc->tsflags, &shinfo->tx_flags);/g' common/net/ipv4/tcp.c
                 echo "BBRv3 full bridge: adapted sock_tx_timestamp() call for old sock.h signature"
+              fi
+            fi
+            if [[ -f common/net/ipv4/tcp_input.c && -f common/include/net/request_sock.h ]]; then
+              if ! grep -q "inet_reqsk_alloc(" common/include/net/request_sock.h && grep -q "reqsk_alloc(" common/include/net/request_sock.h; then
+                sed -i 's/\<inet_reqsk_alloc\>/reqsk_alloc/g' common/net/ipv4/tcp_input.c
+                echo "BBRv3 full bridge: mapped inet_reqsk_alloc() -> reqsk_alloc() for old request_sock API"
               fi
             fi
             if [[ -f common/net/ipv4/tcp_timer.c ]]; then
