@@ -673,6 +673,27 @@ jobs:
                 echo "#endif /* _NET_TCP_AO_H */"
               } > common/include/net/tcp_ao.h
             fi
+            if [[ -f common/net/ipv4/tcp_bbr.c && -f common/include/linux/btf_ids.h ]] && ! grep -q "BTF_KFUNCS_START" common/include/linux/btf_ids.h; then
+              sed -i 's/BTF_KFUNCS_START(/BTF_SET8_START(/g; s/BTF_KFUNCS_END(/BTF_SET8_END(/g' common/net/ipv4/tcp_bbr.c
+            fi
+            if [[ ! -f common/include/net/proto_memory.h ]]; then
+              {
+                echo "/* BBRv3 fullstack compat stub for vendor trees without proto_memory helpers. */"
+                echo "#ifndef _NET_PROTO_MEMORY_H"
+                echo "#define _NET_PROTO_MEMORY_H"
+                echo "#endif /* _NET_PROTO_MEMORY_H */"
+              } > common/include/net/proto_memory.h
+            fi
+            if [[ -f common/include/net/tcp.h && -f common/include/net/inet_timewait_sock.h ]] && ! grep -q "tw_usec_ts" common/include/net/inet_timewait_sock.h; then
+              if grep -q "tw_ts_recent_stamp" common/include/net/inet_timewait_sock.h; then
+                sed -i 's/tw_sk.tw_usec_ts/tw_sk.tw_ts_recent_stamp/g' common/include/net/tcp.h
+              else
+                sed -E -i 's/tcp_clock_ts\\(tcptw->tw_sk.tw_usec_ts\\)[[:space:]]*\\+[[:space:]]*tcptw->tw_ts_offset/0/g' common/include/net/tcp.h
+              fi
+            fi
+            if [[ -f common/include/net/tcp.h && -f common/include/linux/skbuff.h ]] && ! grep -q "skb_frags_readable" common/include/linux/skbuff.h; then
+              sed -E -i 's/skb_frags_readable\\([^)]*\\)[[:space:]]*==[[:space:]]*skb_frags_readable\\([^)]*\\)/1/g' common/include/net/tcp.h
+            fi
           fi
 
           if [[ ! -f common/net/ipv4/tcp_bbr.c ]]; then
